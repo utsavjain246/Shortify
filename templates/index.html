@@ -1,50 +1,40 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shortify</title>
-    <!-- Bootstrap CSS -->
-    <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css">
-    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
-</head>
-<body>
-    <div class="container mt-5">
-        <div class="card">
-            <div class="card-body">
-                <h1 class="card-title text-center">Shortify</h1>
-                {% with messages = get_flashed_messages(with_categories=true) %}
-                  {% if messages %}
-                    <div class="alert alert-dismissible fade show mt-4">
-                    {% for category, message in messages %}
-                      <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
-                        {{ message }}
-                        <button type="button" class="close" data-dismiss="alert" aria-label="Close">
-                          <span aria-hidden="true">&times;</span>
-                        </button>
-                      </div>
-                    {% endfor %}
-                    </div>
-                  {% endif %}
-                {% endwith %}
-                <form action="/" method="post" class="mt-4">
-                    <div class="form-group">
-                        <label for="original_url">Enter URL to shorten:</label>
-                        <input type="url" id="original_url" name="original_url" class="form-control" required>
-                    </div>
-                    <div class="form-group">
-                        <label for="custom_alias">Custom Alias (optional):</label>
-                        <input type="text" id="custom_alias" name="custom_alias" class="form-control" placeholder="Enter custom alias">
-                    </div>
-                    <button type="submit" class="btn btn-primary btn-block">Shorten</button>
-                </form>
+{% extends "base.html" %}
+
+{% block title %}Home - Shortify{% endblock %}
+
+{% block content %}
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<div class="card">
+    <div class="card-body">
+        <h1 class="card-title text-center">Shortify</h1>
+
+        {# Display generated short URL and QR code if available #}
+        {% if short_url_display and qr_code_image %}
+        <div class="alert alert-success mt-4">
+            <p><strong>Short URL Created!</strong></p>
+            <p>Your short URL: <a href="{{ short_url_display }}" target="_blank">{{ short_url_display }}</a></p>
+            <div class="text-center">
+                <img src="data:image/png;base64,{{ qr_code_image }}" alt="QR Code for {{ short_url_display }}" class="img-fluid" style="max-width: 200px; margin-top: 10px;">
             </div>
         </div>
-    </div>
+        {% endif %}
 
-    <!-- Bootstrap JS and dependencies -->
-    <script src="https://code.jquery.com/jquery-3.5.1.slim.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@popperjs/core@2.9.2/dist/umd/popper.min.js"></script>
-    <script src="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/js/bootstrap.min.js"></script>
-</body>
-</html>
+        {# Flash messages are now handled by base.html, but specific errors like 'alias exists' are also handled by re-rendering #}
+        {# The main form #}
+        <form action="/" method="post" class="mt-4">
+            <div class="form-group">
+                <label for="original_url">Enter URL to shorten:</label>
+                <input type="url" id="original_url" name="original_url" class="form-control"
+                       value="{{ original_url_submitted if original_url_submitted else '' }}" required>
+            </div>
+            <div class="form-group">
+                <label for="custom_alias">Custom Alias (optional):</label>
+                <input type="text" id="custom_alias" name="custom_alias" class="form-control"
+                       placeholder="Enter custom alias"
+                       value="{{ custom_alias_submitted if custom_alias_submitted else '' }}">
+            </div>
+            <button type="submit" class="btn btn-primary btn-block">Shorten</button>
+        </form>
+    </div>
+</div>
+{% endblock %}

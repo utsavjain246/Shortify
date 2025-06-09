@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}User Profile - Shortify{% endblock %}
+
+{% block content %}
+<h2>User Profile</h2>
+{% if current_user.is_authenticated %}
+  <p><strong>Username:</strong> {{ current_user.username }}</p>
+
+  <h4>Your API Key</h4>
+  {% if api_key %}
+    <p>
+      <code>{{ api_key }}</code>
+    </p>
+    <p class="text-muted small">
+      Keep this API key confidential. You can use it to access the URL shortening API.
+      If you believe your API key has been compromised, you may need to contact support to have it regenerated (feature coming soon).
+    </p>
+  {% else %}
+    <p class="text-danger">API Key not found. This might indicate an issue with your account setup.</p>
+  {% endif %}
+
+  {# In the future, user-specific information or settings can go here. #}
+{% else %}
+  <p>Please <a href="{{ url_for('login') }}">login</a> to view your profile.</p>
+{% endif %}
+{% endblock %}
