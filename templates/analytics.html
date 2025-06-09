@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+
+{% block title %}My URLs & Analytics - Shortify{% endblock %}
+
+{% block content %}
+<h2>My URLs & Analytics</h2>
+{% if urls %}
+  <table class="table table-striped mt-4">
+    <thead>
+      <tr>
+        <th scope="col">Original URL</th>
+        <th scope="col">Short URL</th>
+        <th scope="col">Clicks</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for url_item in urls %}
+      <tr>
+        <td><a href="{{ url_item.original_url }}" target="_blank">{{ url_item.original_url | truncate(60) }}</a></td>
+        <td><a href="{{ url_for('redirect_to_url', short_url=url_item.short_url, _external=True) }}" target="_blank">{{ url_item.short_url }}</a></td>
+        <td>{{ url_item.clicks }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <p class="mt-4">You haven't shortened any URLs yet. <a href="{{ url_for('index') }}">Shorten one now!</a></p>
+{% endif %}
+{% endblock %}
