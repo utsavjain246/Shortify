@@ -1,7 +1,8 @@
 from flask import Flask, request, redirect, render_template, url_for, flash, current_app, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
-import sqlite3
+import psycopg2
+from psycopg2.extras import DictCursor
 import string
 import random
 import qrcode
@@ -11,12 +12,10 @@ import secrets
 import os
 
 app = Flask(__name__)
-# Load secret key from environment variable
 app.secret_key = os.environ.get('SECRET_KEY', 'dev') 
 
-# Configure database path using instance folder
-db_path = os.path.join(app.instance_path, 'database.db')
-app.config['DATABASE'] = db_path
+# Vercel will set this environment variable for Vercel Postgres
+DATABASE_URL = os.environ.get('POSTGRES_URL')
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -31,52 +30,47 @@ class User(UserMixin):
 @login_manager.user_loader
 def load_user(user_id):
     with get_db() as conn:
-        cur = conn.cursor()
-        user_row = cur.execute("SELECT id, username, password_hash FROM users WHERE id = ?", (user_id,)).fetchone()
-        if user_row:
-            return User(id=user_row[0], username=user_row[1], password_hash=user_row[2])
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, username, password_hash FROM users WHERE id = %s;", (user_id,))
+            user_row = cur.fetchone()
+            if user_row:
+                return User(id=user_row['id'], username=user_row['username'], password_hash=user_row['password_hash'])
     return None
 
 def get_db():
-    conn = sqlite3.connect(current_app.config['DATABASE'])
-    conn.row_factory = sqlite3.Row
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.cursor_factory = DictCursor # Allows accessing columns by name
     return conn
 
 def create_table():
-    # Ensure the instance folder exists
-    try:
-        os.makedirs(app.instance_path)
-    except OSError:
-        pass
-
-    with app.app_context():
-        with get_db() as conn:
-            conn.execute('''
+    with get_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS urls (
-                    id INTEGER PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     original_url TEXT,
-                    short_url TEXT,
+                    short_url TEXT UNIQUE,
                     clicks INTEGER DEFAULT 0,
                     user_id INTEGER,
                     FOREIGN KEY (user_id) REFERENCES users(id)
-                )
+                );
             ''')
-            conn.execute('''
+            cur.execute('''
                 CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id SERIAL PRIMARY KEY,
                     username TEXT UNIQUE NOT NULL,
                     password_hash TEXT NOT NULL,
                     api_key TEXT UNIQUE
-                )
+                );
             ''')
-            conn.commit()
+        conn.commit()
 
+# Create a Flask CLI command to initialize the database
 @app.cli.command("init-db")
 def init_db_command():
-    """Initializes the database."""
+    """Initializes the database tables."""
     create_table()
-    print("Initialized the database.")
-
+    print("Initialized the PostgreSQL database.")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -85,23 +79,26 @@ def index():
         custom_alias = request.form['custom_alias']
         
         with get_db() as conn:
-            if custom_alias:
-                short_url = custom_alias
-                result = conn.execute('SELECT * FROM urls WHERE short_url = ?', (short_url,)).fetchone()
-                if result:
-                    flash('Custom alias already exists. Please choose another one.', 'danger')
-                    return render_template('index.html',
-                                           original_url_submitted=original_url,
-                                           custom_alias_submitted=custom_alias)
-            else:
-                short_url = generate_short_url()
-                while conn.execute('SELECT * FROM urls WHERE short_url = ?', (short_url,)).fetchone():
-                    short_url = generate_short_url()
-            
-            user_id = current_user.id if current_user.is_authenticated else None
+            with conn.cursor() as cur:
+                if custom_alias:
+                    short_url = custom_alias
+                    cur.execute('SELECT id FROM urls WHERE short_url = %s;', (short_url,))
+                    if cur.fetchone():
+                        flash('Custom alias already exists. Please choose another one.', 'danger')
+                        return render_template('index.html',
+                                               original_url_submitted=original_url,
+                                               custom_alias_submitted=custom_alias)
+                else:
+                    while True:
+                        short_url = generate_short_url()
+                        cur.execute('SELECT id FROM urls WHERE short_url = %s;', (short_url,))
+                        if not cur.fetchone():
+                            break
+                
+                user_id = current_user.id if current_user.is_authenticated else None
 
-            conn.execute('INSERT INTO urls (original_url, short_url, user_id) VALUES (?, ?, ?)',
-                         (original_url, short_url, user_id))
+                cur.execute('INSERT INTO urls (original_url, short_url, user_id) VALUES (%s, %s, %s);',
+                             (original_url, short_url, user_id))
             conn.commit()
 
             full_short_url = request.host_url + short_url
@@ -122,175 +119,20 @@ def index():
 
 def generate_short_url():
     characters = string.ascii_letters + string.digits
-    short_url = ''.join(random.choices(characters, k=6))
-    return short_url
+    return ''.join(random.choices(characters, k=6))
 
-
-@app.route('/register', methods=['GET', 'POST'])
-def register():
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-
-        with get_db() as conn:
-            cur = conn.cursor()
-            user_exists = cur.execute('SELECT * FROM users WHERE username = ?', (username,)).fetchone()
-
-            if user_exists:
-                flash('Username already exists. Please choose a different one.', 'danger')
-                return redirect(url_for('register'))
-
-            hashed_password = generate_password_hash(password)
-            api_key = secrets.token_hex(16)
-            while cur.execute("SELECT * FROM users WHERE api_key = ?", (api_key,)).fetchone():
-                api_key = secrets.token_hex(16)
-
-            cur.execute('INSERT INTO users (username, password_hash, api_key) VALUES (?, ?, ?)',
-                        (username, hashed_password, api_key))
-            conn.commit()
-            flash('Registration successful! Please login.', 'success')
-            return redirect(url_for('login'))
-
-    return render_template('register.html')
-
-@app.route('/login', methods=['GET', 'POST'])
-def login():
-    if current_user.is_authenticated:
-        return redirect(url_for('index'))
-    if request.method == 'POST':
-        username = request.form['username']
-        password = request.form['password']
-        with get_db() as conn:
-            cur = conn.cursor()
-            user_row = cur.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (username,)).fetchone()
-
-            if user_row and check_password_hash(user_row['password_hash'], password):
-                user_obj = User(id=user_row['id'], username=user_row['username'], password_hash=user_row['password_hash'])
-                login_user(user_obj)
-                flash('Logged in successfully!', 'success')
-                next_page = request.args.get('next')
-                return redirect(next_page or url_for('index'))
-            else:
-                flash('Invalid username or password.', 'danger')
-    return render_template('login.html')
-
-@app.route('/logout')
-@login_required
-def logout():
-    logout_user()
-    flash('You have been logged out.', 'success')
-    return redirect(url_for('index'))
-
-@app.route('/profile')
-@login_required
-def profile():
-    with get_db() as conn:
-        cur = conn.cursor()
-        user_data = cur.execute("SELECT api_key FROM users WHERE id = ?", (current_user.id,)).fetchone()
-    api_key = user_data['api_key'] if user_data else "No API Key found."
-    return render_template('profile.html', api_key=api_key)
-
-@app.route('/analytics')
-@login_required
-def analytics():
-    with get_db() as conn:
-        cur = conn.cursor()
-        user_urls = cur.execute(
-            "SELECT original_url, short_url, clicks FROM urls WHERE user_id = ?",
-            (current_user.id,)
-        ).fetchall()
-    return render_template('analytics.html', urls=user_urls)
 
 @app.route('/<short_url>')
 def redirect_to_url(short_url):
     with get_db() as conn:
-        cur = conn.cursor()
-        result = cur.execute('SELECT original_url FROM urls WHERE short_url = ?', (short_url,)).fetchone()
+        with conn.cursor() as cur:
+            cur.execute('SELECT original_url FROM urls WHERE short_url = %s;', (short_url,))
+            result = cur.fetchone()
 
-        if result:
-            cur.execute('UPDATE urls SET clicks = clicks + 1 WHERE short_url = ?', (short_url,))
-            conn.commit()
-            return redirect(result['original_url'])
-        else:
-            flash('Invalid URL', 'danger')
-            return redirect(url_for('index'))
-
-@app.route('/api/shorten', methods=['POST'])
-def api_shorten_url():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "Invalid JSON payload"}), 400
-
-    api_key = data.get('api_key')
-    original_url = data.get('original_url')
-    custom_alias = data.get('custom_alias')
-
-    if not api_key:
-        return jsonify({"error": "API key is missing"}), 401
-
-    if not original_url:
-        return jsonify({"error": "Original URL is missing"}), 400
-
-    with get_db() as conn:
-        cur = conn.cursor()
-        user_row = cur.execute("SELECT id FROM users WHERE api_key = ?", (api_key,)).fetchone()
-
-        if not user_row:
-            return jsonify({"error": "Invalid API key"}), 401
-
-        user_id = user_row['id']
-        short_url_slug = ""
-
-        if custom_alias:
-            existing_url = cur.execute("SELECT id FROM urls WHERE short_url = ?", (custom_alias,)).fetchone()
-            if existing_url:
-                return jsonify({"error": "Custom alias already exists"}), 409
-            short_url_slug = custom_alias
-        else:
-            while True:
-                short_url_slug = generate_short_url()
-                if not cur.execute("SELECT id FROM urls WHERE short_url = ?", (short_url_slug,)).fetchone():
-                    break
-
-        try:
-            cur.execute("INSERT INTO urls (original_url, short_url, user_id) VALUES (?, ?, ?)",
-                        (original_url, short_url_slug, user_id))
-            conn.commit()
-        except sqlite3.Error as e:
-            return jsonify({"error": f"Database error: {e}"}), 500
-
-        full_short_url = request.host_url + short_url_slug
-        return jsonify({"short_url": full_short_url, "original_url": original_url}), 201
-
-
-@app.route('/api/analytics/<string:short_url_slug>', methods=['GET'])
-def api_get_analytics(short_url_slug):
-    api_key = request.headers.get('X-API-Key')
-
-    if not api_key:
-        return jsonify({"error": "API key is missing from X-API-Key header"}), 401
-
-    with get_db() as conn:
-        cur = conn.cursor()
-        user_row = cur.execute("SELECT id FROM users WHERE api_key = ?", (api_key,)).fetchone()
-
-        if not user_row:
-            return jsonify({"error": "Invalid API key"}), 401
-
-        authenticated_user_id = user_row['id']
-
-        url_data = cur.execute("SELECT original_url, user_id, clicks FROM urls WHERE short_url = ?",
-                               (short_url_slug,)).fetchone()
-
-        if not url_data:
-            return jsonify({"error": "Short URL not found"}), 404
-
-        if url_data['user_id'] != authenticated_user_id:
-            return jsonify({"error": "Short URL not found or not authorized"}), 404
-
-        full_short_url = request.host_url + short_url_slug
-        return jsonify({
-            "original_url": url_data['original_url'],
-            "short_url": full_short_url,
-            "clicks": url_data['clicks']
-        }), 200
+            if result:
+                cur.execute('UPDATE urls SET clicks = clicks + 1 WHERE short_url = %s;', (short_url,))
+                conn.commit()
+                return redirect(result['original_url'])
+            else:
+                flash('Invalid URL', 'danger')
+                return redirect(url_for('index'))
