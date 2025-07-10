@@ -1,31 +1,32 @@
-from flask import Flask, request, redirect, render_template, url_for, flash, current_app # Added current_app
+from flask import Flask, request, redirect, render_template, url_for, flash, current_app, jsonify
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 import sqlite3
 import string
 import random
-from flask import jsonify # Added for API responses
 import qrcode
 import io
 import base64
-import secrets # For API key generation
+import secrets
+import os
 
 app = Flask(__name__)
-app.secret_key = 'supersecretkey' # Make sure this is a strong, random key in production
+# Load secret key from environment variable
+app.secret_key = os.environ.get('SECRET_KEY', 'dev') 
 
-# DATABASE = 'database.db' # This will now be set via app.config
+# Configure database path using instance folder
+db_path = os.path.join(app.instance_path, 'database.db')
+app.config['DATABASE'] = db_path
 
 login_manager = LoginManager()
 login_manager.init_app(app)
-login_manager.login_view = 'login' # The route to redirect to for login_required views
+login_manager.login_view = 'login'
 
 class User(UserMixin):
     def __init__(self, id, username, password_hash):
         self.id = id
         self.username = username
         self.password_hash = password_hash
-
-    # UserMixin provides get_id, is_authenticated, is_active, is_anonymous
 
 @login_manager.user_loader
 def load_user(user_id):
@@ -37,38 +38,45 @@ def load_user(user_id):
     return None
 
 def get_db():
-    # Use current_app.config to get the database path, default to 'database.db' if not set
-    db_path = current_app.config.get('DATABASE', 'database.db')
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row # Allows accessing columns by name
+    conn = sqlite3.connect(current_app.config['DATABASE'])
+    conn.row_factory = sqlite3.Row
     return conn
 
 def create_table():
-    with get_db() as conn:
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS urls (
-                id INTEGER PRIMARY KEY,
-                original_url TEXT,
-                short_url TEXT,
-                clicks INTEGER DEFAULT 0,
-                user_id INTEGER,
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            )
-        ''')
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                api_key TEXT UNIQUE
-            )
-        ''')
-        conn.commit()
+    # Ensure the instance folder exists
+    try:
+        os.makedirs(app.instance_path)
+    except OSError:
+        pass
 
-def generate_short_url():
-    characters = string.ascii_letters + string.digits
-    short_url = ''.join(random.choices(characters, k=6))
-    return short_url
+    with app.app_context():
+        with get_db() as conn:
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS urls (
+                    id INTEGER PRIMARY KEY,
+                    original_url TEXT,
+                    short_url TEXT,
+                    clicks INTEGER DEFAULT 0,
+                    user_id INTEGER,
+                    FOREIGN KEY (user_id) REFERENCES users(id)
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    api_key TEXT UNIQUE
+                )
+            ''')
+            conn.commit()
+
+@app.cli.command("init-db")
+def init_db_command():
+    """Initializes the database."""
+    create_table()
+    print("Initialized the database.")
+
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -81,7 +89,6 @@ def index():
                 short_url = custom_alias
                 result = conn.execute('SELECT * FROM urls WHERE short_url = ?', (short_url,)).fetchone()
                 if result:
-                    # Flash message is handled by base.html, but we need to pass data to re-render form
                     flash('Custom alias already exists. Please choose another one.', 'danger')
                     return render_template('index.html',
                                            original_url_submitted=original_url,
@@ -97,7 +104,6 @@ def index():
                          (original_url, short_url, user_id))
             conn.commit()
 
-            # Generate QR code
             full_short_url = request.host_url + short_url
             img = qrcode.make(full_short_url)
             buf = io.BytesIO()
@@ -105,15 +111,20 @@ def index():
             buf.seek(0)
             qr_code_image = base64.b64encode(buf.getvalue()).decode('utf-8')
 
-            # Re-render index.html with the results, instead of redirecting
             return render_template('index.html',
                                    short_url_display=full_short_url,
                                    qr_code_image=qr_code_image,
                                    original_url_submitted=original_url,
                                    custom_alias_submitted=custom_alias)
 
-    # For GET requests or if POST fails before QR generation (e.g. alias exists)
     return render_template('index.html')
+
+
+def generate_short_url():
+    characters = string.ascii_letters + string.digits
+    short_url = ''.join(random.choices(characters, k=6))
+    return short_url
+
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -130,10 +141,9 @@ def register():
                 return redirect(url_for('register'))
 
             hashed_password = generate_password_hash(password)
-            # Generate a unique API key
             api_key = secrets.token_hex(16)
             while cur.execute("SELECT * FROM users WHERE api_key = ?", (api_key,)).fetchone():
-                api_key = secrets.token_hex(16) # Regenerate if somehow not unique
+                api_key = secrets.token_hex(16)
 
             cur.execute('INSERT INTO users (username, password_hash, api_key) VALUES (?, ?, ?)',
                         (username, hashed_password, api_key))
@@ -177,7 +187,7 @@ def profile():
     with get_db() as conn:
         cur = conn.cursor()
         user_data = cur.execute("SELECT api_key FROM users WHERE id = ?", (current_user.id,)).fetchone()
-    api_key = user_data['api_key'] if user_data else "No API Key found. Please re-register or contact support." # Should not happen with new registration logic
+    api_key = user_data['api_key'] if user_data else "No API Key found."
     return render_template('profile.html', api_key=api_key)
 
 @app.route('/analytics')
@@ -195,35 +205,25 @@ def analytics():
 def redirect_to_url(short_url):
     with get_db() as conn:
         cur = conn.cursor()
-        # Fetch the original URL
         result = cur.execute('SELECT original_url FROM urls WHERE short_url = ?', (short_url,)).fetchone()
 
         if result:
-            # Increment click count
             cur.execute('UPDATE urls SET clicks = clicks + 1 WHERE short_url = ?', (short_url,))
             conn.commit()
-            return redirect(result['original_url']) # Access by column name
+            return redirect(result['original_url'])
         else:
             flash('Invalid URL', 'danger')
             return redirect(url_for('index'))
 
-if __name__ == '__main__':
-    create_table()
-    # The placeholder login route is now replaced by the full implementation above.
-    app.run(debug=True)
-
-
 @app.route('/api/shorten', methods=['POST'])
 def api_shorten_url():
-    # Use silent=True to prevent raising an exception on malformed JSON,
-    # allowing our custom 'if not data:' check to handle it.
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "Invalid JSON payload"}), 400
 
     api_key = data.get('api_key')
     original_url = data.get('original_url')
-    custom_alias = data.get('custom_alias') # Optional
+    custom_alias = data.get('custom_alias')
 
     if not api_key:
         return jsonify({"error": "API key is missing"}), 401
@@ -244,7 +244,7 @@ def api_shorten_url():
         if custom_alias:
             existing_url = cur.execute("SELECT id FROM urls WHERE short_url = ?", (custom_alias,)).fetchone()
             if existing_url:
-                return jsonify({"error": "Custom alias already exists"}), 409 # 409 Conflict
+                return jsonify({"error": "Custom alias already exists"}), 409
             short_url_slug = custom_alias
         else:
             while True:
@@ -279,19 +279,14 @@ def api_get_analytics(short_url_slug):
 
         authenticated_user_id = user_row['id']
 
-        # Query for the URL, its user_id, and clicks
         url_data = cur.execute("SELECT original_url, user_id, clicks FROM urls WHERE short_url = ?",
                                (short_url_slug,)).fetchone()
 
         if not url_data:
             return jsonify({"error": "Short URL not found"}), 404
 
-        # Authorization check: Does this URL belong to the authenticated user?
         if url_data['user_id'] != authenticated_user_id:
-            # Return 404 to not reveal existence of the URL to unauthorized users
             return jsonify({"error": "Short URL not found or not authorized"}), 404
-            # Or, more explicitly: return jsonify({"error": "Not authorized to view analytics for this URL"}), 403
-
 
         full_short_url = request.host_url + short_url_slug
         return jsonify({
