@@ -3,3 +3,4 @@ Werkzeug
 Flask-Login
 qrcode
 Pillow
+gunicorn
