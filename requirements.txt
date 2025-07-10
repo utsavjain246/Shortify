@@ -4,3 +4,4 @@ Flask-Login
 qrcode
 Pillow
 gunicorn
+psycopg2-binary
